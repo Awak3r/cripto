@@ -1,6 +1,7 @@
 package des
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"lab1/internal/feistel"
@@ -54,23 +55,17 @@ func (RoundFunc) Transform(block interfaces.Block, key []byte) interfaces.Block 
 	if len(block) != 4 || len(key) != 6 {
 		panic(fmt.Sprintf("DES: round requires a 4-byte block and 6-byte key, got %d and %d", len(block), len(key)))
 	}
-	e := permutation.Permute(block, expansion, indexRule)
-	for i := range e {
-		e[i] ^= key[i]
-	}
+	e := expansionLookup[0][block[0]] | expansionLookup[1][block[1]] |
+		expansionLookup[2][block[2]] | expansionLookup[3][block[3]]
+	k := uint64(binary.BigEndian.Uint32(key))<<16 | uint64(binary.BigEndian.Uint16(key[4:]))
+	e ^= k
+	v := spLookup[0][e>>42&63] | spLookup[1][e>>36&63] |
+		spLookup[2][e>>30&63] | spLookup[3][e>>24&63] |
+		spLookup[4][e>>18&63] | spLookup[5][e>>12&63] |
+		spLookup[6][e>>6&63] | spLookup[7][e&63]
 	out := make([]byte, 4)
-	for s := 0; s < 8; s++ {
-
-		bit := func(k int) byte {
-			idx := s*6 + k
-			return e[idx/8] >> (7 - idx%8) & 1
-		}
-		row := bit(0)<<1 | bit(5)
-		col := bit(1)<<3 | bit(2)<<2 | bit(3)<<1 | bit(4)
-		v := sBoxes[s][row<<4|col]
-		out[s/2] |= v << (4 * (1 - s%2))
-	}
-	return permutation.Permute(out, p, indexRule)
+	binary.BigEndian.PutUint32(out, v)
+	return out
 }
 
 type Cipher struct {
@@ -91,8 +86,8 @@ func (c *Cipher) Encrypt(block interfaces.Block) interfaces.Block {
 	if len(block) != 8 {
 		panic(fmt.Sprintf("DES: block must be 8 bytes, got %d", len(block)))
 	}
-	x := permutation.Permute(block, ip, indexRule)
-	return permutation.Permute(swap(c.network.Encrypt(x)), fp, indexRule)
+	x := permuteBlock(block, &ipLookup)
+	return permuteBlock(swap(c.network.Encrypt(x)), &fpLookup)
 }
 
 func (c *Cipher) Decrypt(block interfaces.Block) interfaces.Block {
@@ -100,8 +95,8 @@ func (c *Cipher) Decrypt(block interfaces.Block) interfaces.Block {
 		panic(fmt.Sprintf("DES: block must be 8 bytes, got %d", len(block)))
 	}
 
-	x := permutation.Permute(block, ip, indexRule)
-	return permutation.Permute(c.network.Decrypt(swap(x)), fp, indexRule)
+	x := permuteBlock(block, &ipLookup)
+	return permuteBlock(c.network.Decrypt(swap(x)), &fpLookup)
 }
 func swap(b interfaces.Block) interfaces.Block {
 	h := len(b) / 2

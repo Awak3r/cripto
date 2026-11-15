@@ -11,7 +11,7 @@ import (
 )
 
 // Порция округляется вниз до целого числа блоков (минимум один блок).
-const fileChunkSize = 64 * 1024
+const fileChunkSize = 4 * 1024
 
 func (c *Context) cryptFile(inPath, outPath string, encrypt bool) <-chan error {
 	ch := make(chan error, 1)
@@ -109,6 +109,14 @@ func (c *Context) streamFile(input io.Reader, output *os.File, bs int, encrypt b
 			return readErr
 		}
 		final := readErr != nil
+		if !final {
+			// Проверяем конец файла даже при полной последней порции.
+			_, err := reader.Peek(1)
+			if err != nil && err != io.EOF {
+				return err
+			}
+			final = err == io.EOF
+		}
 		data := buffer[:n]
 		if encrypt {
 			if final {
@@ -122,27 +130,17 @@ func (c *Context) streamFile(input io.Reader, output *os.File, bs int, encrypt b
 			if n == 0 || n%bs != 0 {
 				return fmt.Errorf("некорректная длина шифротекста: порция %d, размер блока %d", n, bs)
 			}
-			if !final {
-				// Один байт упреждения отличает последний полный буфер
-				// от промежуточного, не загружая следующий буфер целиком.
-				if _, err := reader.Peek(1); err != nil {
-					if err != io.EOF {
-						return err
-					}
-					final = true
-				}
-			}
+
 		}
 		out, err := c.applyMode(data, bs, encrypt, state)
 		if err != nil {
 			return err
 		}
 		if !encrypt && final && c.padding != Zeros {
-			last, err := unpad(out[len(out)-bs:], bs, c.padding)
+			out, err = unpad(out, bs, c.padding)
 			if err != nil {
 				return err
 			}
-			out = out[:len(out)-bs+len(last)]
 		}
 		if n, err := output.Write(out); err != nil {
 			return err

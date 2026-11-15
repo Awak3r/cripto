@@ -8,8 +8,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"runtime"
-	"sync"
 
 	"lab1/internal/deal"
 	"lab1/internal/des"
@@ -57,21 +55,22 @@ var lengths = []int{0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 100, 4096}
 
 func Run() error {
 	var errs []error
-	printResult := func(label string, err error) {
-		if err != nil {
-			fmt.Printf("%-30s FAIL: %v\n", label, err)
-		} else {
-			fmt.Printf("%-30s OK\n", label)
-		}
-	}
 	for _, a := range algorithms {
-		fmt.Printf("\n=== %s: псевдослучайные байты ===\n", a.name)
-		if err := byteDemo(a, printResult); err != nil {
-			errs = append(errs, fmt.Errorf("%s: байтовое демо: %w", a.name, err))
+		phase := "байтовое демо"
+		report := func(label string, err error) {
+			if err != nil {
+				fmt.Printf("%-30s FAIL: %v\n", label, err)
+				errs = append(errs, fmt.Errorf("%s: %s: %s: %w", a.name, phase, label, err))
+			} else {
+				fmt.Printf("%-30s OK\n", label)
+			}
 		}
+		fmt.Printf("\n=== %s: псевдослучайные байты ===\n", a.name)
+		byteDemo(a, report)
+		phase = "файловое демо"
 		fmt.Printf("\n=== %s: файлы из data/ ===\n", a.name)
-		if err := fileDemo(a, "data", printResult); err != nil {
-			errs = append(errs, fmt.Errorf("%s: файловое демо: %w", a.name, err))
+		if err := fileDemo(a, "data", report); err != nil {
+			report("подготовка/очистка", err)
 		}
 	}
 	return errors.Join(errs...)
@@ -120,24 +119,7 @@ func roundtripBytes(c *cryptoctx.Context, data []byte) error {
 	return nil
 }
 
-type demoResult struct {
-	label string
-	err   error
-}
-
-func reportResults(results []demoResult, report func(string, error)) error {
-	var errs []error
-	for _, r := range results {
-		report(r.label, r.err)
-		if r.err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", r.label, r.err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func byteDemo(a algorithm, report func(string, error)) error {
-	var results []demoResult
+func byteDemo(a algorithm, report func(string, error)) {
 	for _, m := range modes {
 		for _, p := range paddings {
 			rng := rand.New(rand.NewSource(1))
@@ -149,13 +131,12 @@ func byteDemo(a algorithm, report func(string, error)) error {
 					break
 				}
 			}
-			results = append(results, demoResult{m.name + "/" + p.name, err})
+			report(m.name+"/"+p.name, err)
 		}
 	}
-	return reportResults(results, report)
 }
 
-func fileDemo(a algorithm, dir string, report func(string, error)) error {
+func fileDemo(a algorithm, dir string, report func(string, error)) (err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("чтение %s: %w", dir, err)
@@ -169,34 +150,27 @@ func fileDemo(a algorithm, dir string, report func(string, error)) error {
 	if len(files) == 0 {
 		return fmt.Errorf("в %s нет файлов: добавьте текст, изображение, музыку или видео", dir)
 	}
-	out := filepath.Join(dir, "enc", a.name)
-	if err := os.MkdirAll(out, 0o755); err != nil {
-		return fmt.Errorf("создание %s: %w", out, err)
+	out, err := os.MkdirTemp("", "lab1-demo-")
+	if err != nil {
+		return fmt.Errorf("создание временного каталога: %w", err)
 	}
+	defer func() {
+		if cleanupErr := os.RemoveAll(out); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("удаление временного каталога: %w", cleanupErr))
+		}
+	}()
 
-	results := make([]demoResult, len(files)*len(modes))
-	jobs := make(chan int)
-	var wg sync.WaitGroup
-	for range min(runtime.GOMAXPROCS(0), len(results)) {
-		wg.Go(func() {
-			for i := range jobs {
-				f, m := files[i/len(modes)], modes[i%len(modes)]
-				results[i] = demoResult{f + "/" + m.name, roundtripFile(a, dir, out, f, m)}
-			}
-		})
+	enc := filepath.Join(out, "encrypted")
+	dec := filepath.Join(out, "decrypted")
+	for _, f := range files {
+		for _, m := range modes {
+			report(f+"/"+m.name, roundtripFile(a, filepath.Join(dir, f), enc, dec, m))
+		}
 	}
-	for i := range results {
-		jobs <- i
-	}
-	close(jobs)
-	wg.Wait()
-	return reportResults(results, report)
+	return nil
 }
 
-func roundtripFile(a algorithm, dir, out, f string, m modeEntry) error {
-	src := filepath.Join(dir, f)
-	enc := filepath.Join(out, f+"."+m.name+".enc")
-	dec := filepath.Join(out, f+"."+m.name+".dec")
+func roundtripFile(a algorithm, src, enc, dec string, m modeEntry) error {
 	c := newContext(a, m, cryptoctx.PKCS7)
 	if err := <-c.EncryptFile(src, enc); err != nil {
 		return fmt.Errorf("encrypt: %w", err)
@@ -215,7 +189,7 @@ func roundtripFile(a algorithm, dir, out, f string, m modeEntry) error {
 	}
 	defer got.Close()
 
-	var origBuf, gotBuf [32 * 1024]byte
+	var origBuf, gotBuf [4 * 1024]byte
 	for {
 		nOrig, errOrig := io.ReadFull(orig, origBuf[:])
 		if errOrig != nil && errOrig != io.EOF && errOrig != io.ErrUnexpectedEOF {
