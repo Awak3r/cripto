@@ -3,7 +3,6 @@ package cryptoctx
 import (
 	"bytes"
 	"fmt"
-	"reflect"
 
 	"lab1/internal/interfaces"
 )
@@ -37,10 +36,6 @@ type Context struct {
 	modeParams []any
 }
 
-// NewContext создаёт и настраивает собственный шифр. Фабрика обязана при каждом
-// вызове возвращать независимый экземпляр, допускающий параллельную обработку
-// блоков после SetKey. Nil-фабрика и nil-шифр вызывают panic; panic SetKey при
-// недопустимом ключе передаётся вызывающему коду без перехвата.
 func NewContext(factory func() interfaces.BlockCipher, mode CipherMode, padding PaddingMode, key, iv []byte, modeParams ...any) *Context {
 	if factory == nil {
 		panic("cryptoctx: не задана фабрика блочного шифра")
@@ -48,13 +43,6 @@ func NewContext(factory func() interfaces.BlockCipher, mode CipherMode, padding 
 	cipher := factory()
 	if cipher == nil {
 		panic("cryptoctx: фабрика вернула nil-шифр")
-	}
-	v := reflect.ValueOf(cipher)
-	switch v.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		if v.IsNil() {
-			panic("cryptoctx: фабрика вернула nil-шифр")
-		}
 	}
 	cipher.SetKey(bytes.Clone(key))
 	return &Context{cipher, mode, padding, bytes.Clone(iv), append([]any(nil), modeParams...)}

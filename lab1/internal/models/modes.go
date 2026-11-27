@@ -3,7 +3,7 @@ package cryptoctx
 import (
 	"bytes"
 	"fmt"
-	"math/bits"
+	"math/big"
 	"math/rand"
 	"runtime"
 	"sync"
@@ -37,7 +37,6 @@ func pad(data []byte, bs int, mode PaddingMode) ([]byte, error) {
 			out[i] = byte(n)
 		}
 	case ISO10126:
-
 		for i := len(data); i < len(out)-1; i++ {
 			out[i] = byte(rand.Intn(256))
 		}
@@ -54,7 +53,6 @@ func unpad(data []byte, bs int, mode PaddingMode) ([]byte, error) {
 		return nil, fmt.Errorf("некорректная длина данных с набивкой: %d", len(data))
 	}
 	if mode == Zeros {
-
 		return bytes.TrimRight(data, "\x00"), nil
 	}
 	n := int(data[len(data)-1])
@@ -75,27 +73,13 @@ func xorBytes(a, b []byte) {
 	}
 }
 
-func addDelta(b []byte, d int) {
-	carry := uint(d)
-	for i := len(b) - 1; i >= 0 && carry != 0; i-- {
-		v := uint(b[i]) + (carry & 255)
-		b[i] = byte(v)
-		carry = (carry >> 8) + (v >> 8)
-	}
-}
-
 func counterAt(iv []byte, delta, index int) []byte {
-	out := bytes.Clone(iv)
-	hi, lo := bits.Mul(uint(delta), uint(index))
-	carry := uint(0)
-	for i := len(out) - 1; i >= 0; i-- {
-		carry += uint(out[i]) + (lo & 255)
-		out[i] = byte(carry)
-		carry >>= 8
-		lo = lo>>8 | hi<<(bits.UintSize-8)
-		hi >>= 8
-	}
-	return out
+	counter := new(big.Int).SetBytes(iv)
+	offset := new(big.Int).Mul(big.NewInt(int64(delta)), big.NewInt(int64(index)))
+	counter.Add(counter, offset)
+	modulus := new(big.Int).Lsh(big.NewInt(1), uint(8*len(iv)))
+	counter.Mod(counter, modulus)
+	return counter.FillBytes(make([]byte, len(iv)))
 }
 
 func ivFor(iv []byte, bs int) []byte {
@@ -134,75 +118,32 @@ func (c *Context) apply(data []byte, encrypt bool) ([]byte, error) {
 	if err := c.validate(bs); err != nil {
 		return nil, err
 	}
-	state := c.newModeState(bs)
 	if encrypt {
 		padded, err := pad(data, bs, c.padding)
 		if err != nil {
 			return nil, err
 		}
-		return c.applyMode(padded, bs, true, state)
+		return c.applyMode(padded, bs, true)
 	}
 	if len(data) == 0 || len(data)%bs != 0 {
 		return nil, fmt.Errorf("длина данных %d не кратна размеру блока %d", len(data), bs)
 	}
-	out, err := c.applyMode(data, bs, false, state)
+	out, err := c.applyMode(data, bs, false)
 	if err != nil {
 		return nil, err
 	}
 	return unpad(out, bs, c.padding)
 }
 
-// Состояние принадлежит одной операции, а не Context: параллельные операции
-// не должны менять IV и счётчик друг друга.
-type modeState struct {
-	iv        []byte
-	used      []byte
-	exhausted bool
-}
-
-func (c *Context) newModeState(bs int) *modeState {
-	s := &modeState{iv: ivFor(c.iv, bs)}
-	if c.mode == CTR || c.mode == RandomDelta {
-		s.used = make([]byte, bs)
-	}
-	return s
-}
-
-// Нечётный шаг имеет период 2^(8*bs). Считаем блоки в bs байтах,
-// отдельно представляя ровно полный период: ни сдвигов на 8*bs, ни
-// переполнения машинного счётчика на длинных потоках здесь нет.
-func (s *modeState) reserve(n int) error {
-	if n == 0 {
-		return nil
-	}
-	if s.exhausted {
-		return fmt.Errorf("исчерпан период счётчика CTR/RandomDelta")
-	}
-	next := bytes.Clone(s.used)
-	carry := uint(n)
-	for i := len(next) - 1; i >= 0; i-- {
-		v := uint(next[i]) + (carry & 255)
-		next[i] = byte(v)
-		carry = (carry >> 8) + (v >> 8)
-	}
-	if carry != 0 {
-		if carry != 1 || len(bytes.TrimLeft(next, "\x00")) != 0 {
-			return fmt.Errorf("исчерпан период счётчика CTR/RandomDelta")
-		}
-		s.exhausted = true
-	}
-	s.used = next
-	return nil
-}
-
-func (c *Context) applyMode(data []byte, bs int, encrypt bool, state *modeState) ([]byte, error) {
-	if c.mode == CTR || c.mode == RandomDelta {
-		if err := state.reserve(len(data) / bs); err != nil {
-			return nil, err
+func (c *Context) applyMode(data []byte, bs int, encrypt bool) ([]byte, error) {
+	n := len(data) / bs
+	if (c.mode == CTR || c.mode == RandomDelta) && n > 0 {
+		if big.NewInt(int64(n-1)).BitLen() > 8*bs {
+			return nil, fmt.Errorf("исчерпан период счётчика")
 		}
 	}
 	out := make([]byte, len(data))
-	iv := state.iv
+	iv := ivFor(c.iv, bs)
 	switch c.mode {
 	case ECB:
 		f := c.cipher.Encrypt
@@ -235,9 +176,6 @@ func (c *Context) applyMode(data []byte, bs int, encrypt bool, state *modeState)
 					copy(out[off:off+bs], res)
 				}
 			})
-			if len(data) > 0 {
-				copy(iv, data[len(data)-bs:])
-			}
 			break
 		}
 		for off := 0; off < len(data); off += bs {
@@ -277,35 +215,25 @@ func (c *Context) applyMode(data []byte, bs int, encrypt bool, state *modeState)
 			delta = c.modeParams[0].(int)
 		}
 		parallelBlocks(len(data)/bs, func(start, end int) {
-			counter := counterAt(iv, delta, start)
 			for i := start; i < end; i++ {
 				off := i * bs
 				copy(out[off:off+bs], data[off:off+bs])
-				xorBytes(out[off:off+bs], c.cipher.Encrypt(bytes.Clone(counter)))
-				addDelta(counter, delta)
+				xorBytes(out[off:off+bs], c.cipher.Encrypt(counterAt(iv, delta, i)))
 			}
 		})
-		iv = counterAt(iv, delta, len(data)/bs)
 	}
-	state.iv = iv
 	return out, nil
 }
 
 func parallelBlocks(n int, f func(start, end int)) {
-	workers := min(n, runtime.GOMAXPROCS(0))
-	if workers <= 1 {
-		if n > 0 {
-			f(0, n)
-		}
+	if n == 0 {
 		return
 	}
+	workers := min(n, runtime.GOMAXPROCS(0))
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
-		start := n/workers*w + min(w, n%workers)
-		end := start + n/workers
-		if w < n%workers {
-			end++
-		}
+		start := w * n / workers
+		end := (w + 1) * n / workers
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
