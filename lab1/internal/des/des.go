@@ -1,7 +1,6 @@
 package des
 
 import (
-	"encoding/binary"
 	"fmt"
 
 	"lab1/internal/feistel"
@@ -15,56 +14,58 @@ type KeyExpansion struct{}
 
 func (KeyExpansion) Expand(key []byte) [][]byte {
 	if len(key) != 8 {
-		panic(fmt.Sprintf("ключ DES должен быть 8 байт, получено %d", len(key)))
+		panic("ключ DES должен быть 8 байт")
 	}
 	cd := permutation.Permute(key, pc1, indexRule)
 	keys := make([][]byte, 16)
-	for r := 0; r < 16; r++ {
-		rot(cd, 0, 28, shifts[r])
-		rot(cd, 28, 56, shifts[r])
+	for r := range keys {
+		cd = rotateHalves(cd, shifts[r])
 		keys[r] = permutation.Permute(cd, pc2, indexRule)
 	}
 	return keys
 }
 
-func rot(cd []byte, from, to, n int) {
-	bits := to - from
-	var v uint32
-	for i := from; i < to; i++ {
-		v = v<<1 | uint32(cd[i/8]>>(7-i%8)&1)
+func rotateHalves(cd []byte, shift int) []byte {
+	order := make([]int, 56)
+	for i := 0; i < 28; i++ {
+		order[i] = (i+shift)%28 + 1
+		order[i+28] = order[i] + 28
 	}
-	v = (v<<uint(n) | v>>uint(bits-n)) & (1<<bits - 1)
-	for i := from; i < to; i++ {
-		setBit28(cd, i, byte(v>>(to-1-i))&1)
-	}
-}
-
-func setBit28(v []byte, index int, bit byte) {
-
-	b, i := index/8, 7-index%8
-	if bit == 1 {
-		v[b] |= 1 << i
-	} else {
-		v[b] &^= 1 << i
-	}
+	return permutation.Permute(cd, order, indexRule)
 }
 
 type RoundFunc struct{}
 
 func (RoundFunc) Transform(block interfaces.Block, key []byte) interfaces.Block {
 	if len(block) != 4 || len(key) != 6 {
-		panic(fmt.Sprintf("DES: round requires a 4-byte block and 6-byte key, got %d and %d", len(block), len(key)))
+		panic("DES: раунд требует блок 4 байта и ключ 6 байт")
 	}
-	e := expansionLookup[0][block[0]] | expansionLookup[1][block[1]] |
-		expansionLookup[2][block[2]] | expansionLookup[3][block[3]]
-	k := uint64(binary.BigEndian.Uint32(key))<<16 | uint64(binary.BigEndian.Uint16(key[4:]))
-	e ^= k
-	v := spLookup[0][e>>42&63] | spLookup[1][e>>36&63] |
-		spLookup[2][e>>30&63] | spLookup[3][e>>24&63] |
-		spLookup[4][e>>18&63] | spLookup[5][e>>12&63] |
-		spLookup[6][e>>6&63] | spLookup[7][e&63]
+	expanded := permutation.Permute(block, expansion, indexRule)
+	for i := range expanded {
+		expanded[i] ^= key[i]
+	}
+	substituted := applySBoxes(expanded)
+	return permutation.Permute(substituted, p, indexRule)
+}
+
+func applySBoxes(data []byte) []byte {
 	out := make([]byte, 4)
-	binary.BigEndian.PutUint32(out, v)
+	for s := 0; s < 8; s++ {
+		var six byte
+		for j := 0; j < 6; j++ {
+			i := s*6 + j
+			bit := (data[i/8] >> (7-i%8)) & 1
+			six = (six << 1) | bit
+		}
+		row := ((six >> 5) << 1) | (six & 1)
+		col := (six >> 1) & 15
+		value := sBoxes[s][int(row)*16+int(col)]
+		if s%2 == 0 {
+			out[s/2] = value << 4
+		} else {
+			out[s/2] |= value
+		}
+	}
 	return out
 }
 
@@ -73,9 +74,7 @@ type Cipher struct {
 }
 
 func NewCipher() *Cipher {
-	c := &Cipher{}
-	c.network = feistel.NewNetwork(KeyExpansion{}, RoundFunc{}, 16)
-	return c
+	return &Cipher{feistel.NewNetwork(KeyExpansion{}, RoundFunc{}, 16)}
 }
 
 func (c *Cipher) SetKey(key []byte) { c.network.SetKey(key) }
@@ -84,20 +83,22 @@ func (c *Cipher) BlockSize() int { return 8 }
 
 func (c *Cipher) Encrypt(block interfaces.Block) interfaces.Block {
 	if len(block) != 8 {
-		panic(fmt.Sprintf("DES: block must be 8 bytes, got %d", len(block)))
+		panic(fmt.Sprintf("DES: блок должен быть 8 байт, получено %d", len(block)))
 	}
-	x := permuteBlock(block, &ipLookup)
-	return permuteBlock(swap(c.network.Encrypt(x)), &fpLookup)
+	x := permutation.Permute(block, ip, indexRule)
+	x = swap(c.network.Encrypt(x))
+	return permutation.Permute(x, fp, indexRule)
 }
 
 func (c *Cipher) Decrypt(block interfaces.Block) interfaces.Block {
 	if len(block) != 8 {
-		panic(fmt.Sprintf("DES: block must be 8 bytes, got %d", len(block)))
+		panic(fmt.Sprintf("DES: блок должен быть 8 байт, получено %d", len(block)))
 	}
-
-	x := permuteBlock(block, &ipLookup)
-	return permuteBlock(c.network.Decrypt(swap(x)), &fpLookup)
+	x := permutation.Permute(block, ip, indexRule)
+	x = c.network.Decrypt(swap(x))
+	return permutation.Permute(x, fp, indexRule)
 }
+
 func swap(b interfaces.Block) interfaces.Block {
 	h := len(b) / 2
 	return append(append([]byte(nil), b[h:]...), b[:h]...)

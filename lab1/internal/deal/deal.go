@@ -2,7 +2,6 @@ package deal
 
 import (
 	"fmt"
-	"sync"
 
 	"lab1/internal/des"
 	"lab1/internal/feistel"
@@ -39,29 +38,20 @@ func (KeyExpansion) Expand(key []byte) [][]byte {
 	return keys
 }
 
-type RoundFunc struct {
-	ciphers sync.Map
-}
+type RoundFunc struct{}
 
-func (rf *RoundFunc) Transform(block interfaces.Block, key []byte) interfaces.Block {
-	k := string(key)
-	if v, ok := rf.ciphers.Load(k); ok {
-		return v.(*des.Cipher).Encrypt(block)
-	}
+func (RoundFunc) Transform(block interfaces.Block, key []byte) interfaces.Block {
 	c := des.NewCipher()
 	c.SetKey(key)
-	v, _ := rf.ciphers.LoadOrStore(k, c)
-	return v.(*des.Cipher).Encrypt(block)
+	return c.Encrypt(block)
 }
 
 type Cipher struct {
 	network *feistel.Network
 }
 
-var _ interfaces.BlockCipher = (*Cipher)(nil)
-
 func NewCipher() *Cipher {
-	return &Cipher{feistel.NewNetwork(KeyExpansion{}, &RoundFunc{}, 6)}
+	return &Cipher{feistel.NewNetwork(KeyExpansion{}, RoundFunc{}, 6)}
 }
 
 func (c *Cipher) SetKey(key []byte) {
@@ -70,7 +60,7 @@ func (c *Cipher) SetKey(key []byte) {
 		rounds = 8
 	}
 
-	n := feistel.NewNetwork(KeyExpansion{}, &RoundFunc{}, rounds)
+	n := feistel.NewNetwork(KeyExpansion{}, RoundFunc{}, rounds)
 	n.SetKey(key)
 	c.network = n
 }
