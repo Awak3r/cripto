@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -177,16 +178,37 @@ func roundtripFile(a algorithm, src, enc, dec string, m modeEntry) error {
 	if err := <-c.DecryptFile(enc, dec); err != nil {
 		return fmt.Errorf("decrypt: %w", err)
 	}
-	orig, err := os.ReadFile(src)
+	return compareFiles(src, dec)
+}
+
+func compareFiles(src, dec string) error {
+	a, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	got, err := os.ReadFile(dec)
+	defer a.Close()
+
+	b, err := os.Open(dec)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(orig, got) {
-		return fmt.Errorf("расшифрованный файл отличается от исходного")
+	defer b.Close()
+
+	x, y := make([]byte, 64*1024), make([]byte, 64*1024)
+	for {
+		n, errA := io.ReadFull(a, x)
+		m, errB := io.ReadFull(b, y)
+		if errA != nil && errA != io.EOF && errA != io.ErrUnexpectedEOF {
+			return errA
+		}
+		if errB != nil && errB != io.EOF && errB != io.ErrUnexpectedEOF {
+			return errB
+		}
+		if n != m || !bytes.Equal(x[:n], y[:m]) {
+			return fmt.Errorf("расшифрованный файл отличается от исходного")
+		}
+		if errA != nil {
+			return nil
+		}
 	}
-	return nil
 }
